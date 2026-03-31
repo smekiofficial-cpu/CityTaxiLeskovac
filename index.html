@@ -1,0 +1,964 @@
+<!DOCTYPE html>
+<html lang="sr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>City Taxi Leskovac - Pro Dispečer</title>
+
+    <!-- Eksterni resursi -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <!-- Leaflet Karte -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <!-- Dodatak za Navigaciju (Leaflet Routing Machine) -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
+    <script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, query, updateDoc, addDoc, deleteDoc, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        const firebaseConfig = JSON.parse(window.__firebase_config || '{}');
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'city-taxi-leskovac-v1';
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        window.fbase = {
+            db, auth, appId, doc, setDoc, getDoc, collection, onSnapshot,
+            query, updateDoc, addDoc, deleteDoc, signInWithCustomToken, signInAnonymously, onAuthStateChanged
+        };
+    </script>
+
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        taxi: { yellow: '#FFD700', dark: '#0F172A', slate: '#1E293B', accent: '#F59E0B' }
+                    }
+                }
+            }
+        }
+    </script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;600;800&display=swap');
+
+        body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #0F172A; color: #F8FAFC; margin: 0; overflow: hidden; }
+        .glass { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.1); }
+
+        #dispatcher-map, #driver-map {
+            width: 100%;
+            height: 100%;
+            background: #111827;
+            border-radius: 1.5rem;
+        }
+
+        .hidden-view { display: none !important; }
+
+        .taxi-marker {
+            width: 34px;
+            height: 34px;
+            background: #FFD700;
+            border: 3px solid #0F172A;
+            border-radius: 10px;
+            box-shadow: 0 0 20px rgba(255, 215, 0, 0.6);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 800;
+            font-size: 12px;
+            color: #0F172A;
+            transition: all 0.3s ease;
+        }
+
+        .order-marker {
+            width: 14px;
+            height: 14px;
+            background: #EF4444;
+            border: 2px solid white;
+            border-radius: 50%;
+            box-shadow: 0 0 15px rgba(239, 68, 68, 0.9);
+            animation: pulse-red 2s infinite;
+        }
+
+        @keyframes pulse-red {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        }
+
+        .loader {
+            border: 3px solid rgba(255, 255, 255, 0.1);
+            border-top: 3px solid #FFD700;
+            border-radius: 50%;
+            width: 40px; height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        .leaflet-tile { filter: brightness(0.6) invert(1) contrast(3) hue-rotate(200deg) saturate(0.3) brightness(0.7); }
+        .leaflet-container { background: #0F172A !important; }
+
+        /* Animacija za alarm */
+        .alarm-glow {
+            animation: glow-red 0.5s infinite alternate;
+        }
+        @keyframes glow-red {
+            from { box-shadow: 0 0 10px #ef4444; }
+            to { box-shadow: 0 0 40px #ef4444; }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="app">
+        <!-- UČITAVANJE -->
+        <div id="loader-view" class="fixed inset-0 bg-taxi-dark z-[2000] flex flex-col items-center justify-center">
+            <div class="text-7xl mb-6 animate-bounce">🚕</div>
+            <div class="loader mb-4"></div>
+            <p class="text-taxi-yellow font-bold tracking-widest text-xs uppercase">City Taxi Leskovac - Pro Dispečer</p>
+        </div>
+
+        <!-- PRIJAVA -->
+        <div id="view-login" class="min-h-screen flex items-center justify-center p-6 hidden-view">
+            <div class="glass p-12 rounded-[3rem] w-full max-w-md shadow-2xl text-center border-t-8 border-taxi-yellow relative overflow-hidden">
+                <h1 class="text-4xl font-black text-taxi-yellow mb-2 italic">CITY TAXI <span class="text-white not-italic">LE</span></h1>
+                <p class="text-slate-500 text-[10px] uppercase font-bold tracking-[0.5em] mb-12">Dispečerski Centar Leskovac</p>
+                <div class="space-y-4">
+                    <button onclick="app.nav('dispatcher')" class="w-full bg-taxi-yellow text-taxi-dark font-black py-5 rounded-2xl hover:scale-[1.02] active:scale-95 transition shadow-2xl shadow-taxi-yellow/20 text-lg uppercase">Dispečer Panel</button>
+                    <div class="flex items-center gap-4 py-3"><hr class="flex-grow border-slate-700"> <span class="text-slate-600 text-[10px] font-bold">SMENA</span> <hr class="flex-grow border-slate-700"></div>
+                    <div class="bg-slate-800/40 p-6 rounded-3xl border border-white/5">
+                        <input type="number" id="driver-id-login" placeholder="Broj Vozila (ID)" class="w-full bg-slate-900 border border-slate-700 p-4 rounded-2xl text-center font-bold text-taxi-yellow outline-none mb-4 focus:ring-2 focus:ring-taxi-yellow transition">
+                        <button onclick="app.loginDriver()" class="w-full bg-white text-taxi-dark font-black py-4 rounded-2xl hover:bg-slate-200 transition uppercase text-sm">Prijava Vozača</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- DISPEČER PANEL -->
+        <div id="view-dispatcher" class="min-h-screen flex flex-col hidden-view">
+            <header class="glass p-4 px-6 flex justify-between items-center z-50">
+                <div class="flex items-center gap-4">
+                    <div class="bg-taxi-yellow text-taxi-dark font-black px-3 py-1 rounded-lg text-lg">LE</div>
+                    <div>
+                        <h2 class="text-sm font-bold uppercase tracking-widest leading-none">City Taxi <span class="text-taxi-yellow">Leskovac</span></h2>
+                        <p class="text-[9px] text-slate-500 font-bold mt-1">SISTEM ZA PRAĆENJE • AKTIVAN</p>
+                    </div>
+                </div>
+                <div class="flex items-center gap-4">
+                    <div id="clock" class="text-xs font-mono text-slate-400 hidden md:block">00:00:00</div>
+                    <button onclick="app.nav('login')" class="text-[10px] bg-red-500/10 text-red-500 border border-red-500/20 px-4 py-2 rounded-xl font-bold hover:bg-red-500 hover:text-white transition">ODJAVA</button>
+                </div>
+            </header>
+
+            <main class="flex-grow grid grid-cols-12 overflow-hidden">
+                <div class="col-span-12 lg:col-span-9 relative p-4">
+                    <div id="dispatcher-map"></div>
+
+                    <!-- AI Status Overlay -->
+                    <div id="ai-voice-status" class="hidden fixed inset-0 z-[2000] bg-taxi-dark/90 backdrop-blur-xl flex flex-col items-center justify-center p-8 text-center">
+                        <div class="relative w-32 h-32 mb-8">
+                            <div class="absolute inset-0 bg-taxi-yellow rounded-full animate-ping opacity-25"></div>
+                            <div class="relative w-full h-full bg-taxi-yellow rounded-full flex items-center justify-center text-5xl">🎙️</div>
+                        </div>
+                        <h2 id="ai-status-text" class="text-2xl font-black text-white mb-2 italic tracking-tight">CITY TAXI IZVOLITE...</h2>
+                        <p id="ai-sub-text" class="text-taxi-yellow font-bold uppercase tracking-widest text-xs">Slušamo adresu klijenta</p>
+                        <div id="recognized-text" class="mt-12 text-slate-400 italic font-medium max-w-lg border-b border-white/10 pb-4 min-h-[1.5em]"></div>
+                        <div id="geo-status" class="mt-4 text-[10px] font-bold text-slate-500"></div>
+                    </div>
+
+                    <!-- AI Report Modal -->
+                    <div id="ai-report-modal" class="hidden fixed inset-0 z-[2500] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+                        <div class="glass p-8 rounded-[2rem] w-full max-w-lg border-t-4 border-taxi-yellow shadow-2xl relative">
+                            <button onclick="document.getElementById('ai-report-modal').classList.add('hidden')" class="absolute top-4 right-4 text-slate-400 hover:text-white text-xl">&times;</button>
+                            <h3 class="text-xl font-black text-taxi-yellow mb-2">AI Dnevni Izvještaj</h3>
+                            <p class="text-xs text-slate-400 uppercase tracking-widest mb-6 border-b border-white/10 pb-2">Analiza poslovanja</p>
+                            <div id="ai-report-content" class="text-sm leading-relaxed text-slate-200 min-h-[100px] flex items-center justify-center italic">
+                                Učitavanje izvještaja...
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- AI Chatbot Modal -->
+                    <div id="ai-chat-modal" class="hidden absolute bottom-8 right-8 z-[2000] bg-taxi-dark/95 backdrop-blur-xl border border-taxi-yellow/50 rounded-3xl w-80 shadow-2xl flex flex-col h-96 overflow-hidden">
+                        <div class="bg-taxi-yellow text-taxi-dark font-black p-3 flex justify-between items-center text-xs uppercase tracking-widest">
+                            <span class="flex items-center gap-2">AI Dispečer Chat</span>
+                            <button onclick="document.getElementById('ai-chat-modal').classList.add('hidden')" class="hover:text-white text-lg leading-none">&times;</button>
+                        </div>
+                        <div id="ai-chat-messages" class="flex-grow p-4 overflow-y-auto flex flex-col gap-3 text-sm">
+                            <div class="bg-slate-800 text-white p-3 rounded-2xl rounded-tl-none self-start max-w-[85%] border border-white/5 text-xs">
+                                Pozdrav! Ja sam vaš AI asistent. Pitajte me bilo što o vozačima, zaradi ili današnjem prometu.
+                            </div>
+                        </div>
+                        <form onsubmit="app.sendChatMessage(event)" class="p-3 bg-slate-900 border-t border-white/10 flex gap-2">
+                            <input type="text" id="ai-chat-input" placeholder="Pitaj me nešto..." class="flex-grow bg-slate-800 text-white px-3 py-2 rounded-xl outline-none focus:ring-1 focus:ring-taxi-yellow text-xs" autocomplete="off">
+                            <button type="submit" class="bg-taxi-yellow text-taxi-dark p-2 px-3 rounded-xl font-black text-xs hover:bg-white transition">&#10148;</button>
+                        </form>
+                    </div>
+
+                    <div class="absolute top-8 left-8 z-[1000] flex flex-col gap-2">
+                        <div class="glass px-4 py-2 rounded-xl border-l-4 border-taxi-yellow text-xs font-bold">&#128205; Grad Leskovac</div>
+                    </div>
+                </div>
+
+                <div class="col-span-12 lg:col-span-3 glass border-l border-white/5 flex flex-col p-6 overflow-y-auto">
+                    <!-- Statistika i Zarada -->
+                    <div class="grid grid-cols-2 gap-3 mb-4">
+                        <div class="glass p-4 rounded-2xl border-t-2 border-taxi-yellow">
+                            <p class="text-[9px] font-black text-slate-500 uppercase">Danas Vožnji</p>
+                            <p id="stat-total-rides" class="text-xl font-black">0</p>
+                        </div>
+                        <div class="glass p-4 rounded-2xl border-t-2 border-green-500">
+                            <p class="text-[9px] font-black text-slate-500 uppercase">Ukupna Zarada</p>
+                            <p id="stat-total-earn" class="text-xl font-black">0 RSD</p>
+                        </div>
+                    </div>
+
+                    <!-- AI Akcijski gumbi (Izvještaj i Chat) -->
+                    <div class="flex gap-2 mb-6">
+                        <button onclick="app.generateAIReport()" class="flex-1 bg-slate-800 text-taxi-yellow border border-taxi-yellow/30 p-3 rounded-2xl font-bold text-[10px] hover:bg-taxi-yellow hover:text-taxi-dark transition shadow-lg flex flex-col items-center justify-center gap-1">
+                            <span class="text-lg leading-none">&#128202;</span> AI Izvještaj
+                        </button>
+                        <button onclick="document.getElementById('ai-chat-modal').classList.remove('hidden')" class="flex-1 bg-slate-800 text-taxi-yellow border border-taxi-yellow/30 p-3 rounded-2xl font-bold text-[10px] hover:bg-taxi-yellow hover:text-taxi-dark transition shadow-lg flex flex-col items-center justify-center gap-1">
+                            <span class="text-lg leading-none">&#128172;</span> AI Pomoćnik
+                        </button>
+                    </div>
+
+                    <button onclick="app.startSmartCall()" class="w-full bg-taxi-yellow text-taxi-dark p-5 rounded-3xl flex items-center gap-4 hover:scale-[1.02] transition shadow-xl shadow-taxi-yellow/10 group mb-8">
+                        <div class="w-12 h-12 bg-taxi-dark rounded-2xl flex items-center justify-center text-2xl group-hover:scale-110 transition">🎧</div>
+                        <div class="text-left">
+                            <p class="text-xs font-black">PRIMI POZIV</p>
+                            <p class="text-[9px] font-bold uppercase leading-tight opacity-70">AI Automatizacija</p>
+                        </div>
+                    </button>
+
+                    <div class="mb-8">
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">Aktivni Vozači</h3>
+                            <span id="active-count-badge" class="bg-taxi-yellow/10 text-taxi-yellow text-[9px] px-2 py-0.5 rounded-full font-black">0 ON</span>
+                        </div>
+                        <div id="drivers-status-list" class="space-y-3"></div>
+                    </div>
+
+                    <div class="flex-grow flex flex-col min-h-0">
+                        <h3 class="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mb-4">Istorija Danas</h3>
+                        <div id="history-list" class="space-y-3 overflow-y-auto pr-2 text-[10px]">
+                            <!-- Dinamička istorija -->
+                        </div>
+                    </div>
+                </div>
+            </main>
+        </div>
+
+        <!-- VOZAČ PANEL -->
+        <div id="view-driver" class="min-h-screen flex flex-col hidden-view">
+            <header class="p-6 flex justify-between items-center z-50 absolute inset-x-0 top-0 pointer-events-none">
+                <div class="glass p-3 px-5 rounded-2xl pointer-events-auto border-l-4 border-taxi-yellow">
+                    <h2 class="text-xl font-black italic">VOZAČ <span class="text-taxi-yellow" id="drv-label">#--</span></h2>
+                </div>
+                <button onclick="app.nav('login')" class="glass p-3 px-5 rounded-2xl pointer-events-auto text-[10px] font-black uppercase text-red-400">Izlaz</button>
+            </header>
+            <main class="flex-grow relative">
+                <div id="driver-map"></div>
+
+                <!-- Kontrole Mape za Vozača -->
+                <div class="absolute top-24 right-6 z-[1000] flex flex-col gap-2 pointer-events-auto">
+                    <button onclick="app.resetDriverView()" class="glass w-12 h-12 rounded-2xl flex items-center justify-center text-xl shadow-xl hover:bg-white/10 transition" title="Mapa Grada">&#128506;&#65039;</button>
+                    <button onclick="app.focusDriverLocation()" class="glass w-12 h-12 rounded-2xl flex items-center justify-center text-xl shadow-xl hover:bg-white/10 transition" title="Moja Lokacija">&#128205;</button>
+                </div>
+
+                <!-- Aktivna Vožnja / Modal -->
+                <div id="job-card" class="hidden-view fixed inset-x-6 bottom-32 glass p-8 rounded-[3rem] border-4 border-taxi-yellow z-[2000] shadow-2xl alarm-glow">
+                    <div class="flex justify-between items-start mb-4">
+                        <p class="text-taxi-yellow font-black uppercase tracking-[0.3em] text-[10px]">HITNA NARUDŽBINA</p>
+                        <span class="bg-white/10 px-2 py-1 rounded text-[9px] font-bold">LOKACIJA SNIMLJENA</span>
+                    </div>
+                    <h1 id="job-addr-display" class="text-3xl font-black text-white mb-6 leading-tight">...</h1>
+
+                    <!-- ETA Input (samo pri prihvatanju) -->
+                    <div id="eta-container" class="mb-6 hidden">
+                        <p class="text-[10px] font-bold uppercase text-slate-400 mb-2">Za koliko minuta stižete?</p>
+                        <div class="grid grid-cols-4 gap-2">
+                            <button onclick="app.setETA(3)" class="bg-slate-800 p-3 rounded-xl font-bold hover:bg-taxi-yellow hover:text-taxi-dark transition">3m</button>
+                            <button onclick="app.setETA(5)" class="bg-slate-800 p-3 rounded-xl font-bold hover:bg-taxi-yellow hover:text-taxi-dark transition">5m</button>
+                            <button onclick="app.setETA(10)" class="bg-slate-800 p-3 rounded-xl font-bold hover:bg-taxi-yellow hover:text-taxi-dark transition">10m</button>
+                            <input type="number" id="custom-eta" placeholder="+" class="bg-slate-800 p-3 rounded-xl font-bold text-center outline-none focus:ring-2 focus:ring-taxi-yellow">
+                        </div>
+                    </div>
+
+                    <div class="flex gap-3">
+                        <button id="btn-job-reject" onclick="app.handleJobReject()" class="w-1/3 bg-red-500/20 text-red-500 font-bold py-5 rounded-3xl text-sm border border-red-500/50 hover:bg-red-500 hover:text-white transition">ODBIJ</button>
+                        <button id="btn-job-action" onclick="app.handleJobAcceptInit()" class="flex-grow bg-taxi-yellow text-taxi-dark font-black py-5 rounded-3xl text-xl shadow-xl active:scale-95 transition">PRIHVATI</button>
+                    </div>
+                </div>
+
+                <div class="absolute inset-x-0 bottom-0 p-6 z-[1000] flex flex-col gap-4 pointer-events-none">
+                    <div class="glass p-6 rounded-[2.5rem] flex flex-col pointer-events-auto max-w-md mx-auto w-full border border-white/5 gap-3">
+                        <div class="flex items-center justify-between px-2">
+                            <div class="flex flex-col">
+                                <div class="flex items-center gap-2 mb-1">
+                                    <span id="status-dot" class="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.5)]"></span>
+                                    <span id="status-text" class="text-[10px] font-black text-green-500 uppercase tracking-widest">Slobodan</span>
+                                </div>
+                                <span class="text-xl font-black tracking-tighter uppercase">LESKOVAC <span class="text-taxi-yellow">Taxi</span></span>
+                            </div>
+                            <div class="text-right">
+                                <span class="text-[10px] font-bold text-slate-400 block uppercase">ID Vozila</span>
+                                <span class="text-lg font-black text-white" id="drv-id-display">#--</span>
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-3 gap-2 mt-2">
+                            <button onclick="app.setDriverStatus('slobodan')" id="btn-stat-slobodan" class="bg-green-500 text-white font-bold py-3 rounded-2xl text-[10px] transition ring-2 ring-green-500 ring-offset-2 ring-offset-taxi-dark shadow-lg shadow-green-500/20">SLOBODAN</button>
+                            <button onclick="app.setDriverStatus('pauza')" id="btn-stat-pauza" class="bg-slate-800 text-slate-400 font-bold py-3 rounded-2xl text-[10px] transition hover:bg-slate-700">PAUZA</button>
+                            <button onclick="app.setDriverStatus('van auta')" id="btn-stat-van" class="bg-slate-800 text-slate-400 font-bold py-3 rounded-2xl text-[10px] transition hover:bg-slate-700">VAN AUTA</button>
+                        </div>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <div id="toast-area" class="fixed top-8 right-8 z-[3000] flex flex-col gap-3 pointer-events-none"></div>
+
+    <script>
+        const app = {
+            state: {
+                view: 'login',
+                drivers: [],
+                currentUser: null,
+                activeDriver: null,
+                activeJob: null,
+                dispatcherMap: null,
+                driverMap: null,
+                markers: {},
+                orderMarkers: [],
+                driverViewOrderMarker: null,
+                routingControl: null,
+                leskovacCenter: [42.9981, 21.9461],
+                recognition: null,
+                locationIQKey: "sk_48945d8bb092a505c1c2a109433095e10b68e18b56d52cd6",
+                history: [],
+                alarmInterval: null,
+                selectedETA: null
+            },
+
+            // Gemini API Helper funkcija s eksponencijalnim odgađanjem
+            async callGeminiAPI(userQuery, systemPrompt = "") {
+                const apiKey = "";
+                const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+
+                const payload = {
+                    contents: [{ parts: [{ text: userQuery }] }],
+                    systemInstruction: { parts: [{ text: systemPrompt }] }
+                };
+
+                const delays = [1000, 2000, 4000, 8000, 16000];
+
+                for (let attempt = 0; attempt <= delays.length; attempt++) {
+                    try {
+                        const response = await fetch(url, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload)
+                        });
+
+                        if (response.ok) {
+                            const result = await response.json();
+                            return result.candidates?.[0]?.content?.parts?.[0]?.text || null;
+                        }
+                    } catch (e) {
+                        console.warn(`Gemini API pokušaj ${attempt + 1} nije uspio. Odgađanje...`);
+                    }
+
+                    if (attempt < delays.length) {
+                        await new Promise(r => setTimeout(r, delays[attempt]));
+                    }
+                }
+                throw new Error("Nije moguće uspostaviti vezu s Gemini API-jem nakon više pokušaja.");
+            },
+
+            async init() {
+                const { signInWithCustomToken, signInAnonymously, onAuthStateChanged, auth } = window.fbase;
+
+                const startAuth = async () => {
+                    try {
+                        if (typeof window.__initial_auth_token !== 'undefined' && window.__initial_auth_token) {
+                            await signInWithCustomToken(auth, window.__initial_auth_token);
+                        } else {
+                            await signInAnonymously(auth);
+                        }
+                    } catch (e) { console.error("Auth init error:", e); }
+                };
+
+                onAuthStateChanged(auth, (user) => {
+                    this.state.currentUser = user;
+                    if(user) {
+                        document.getElementById('loader-view').classList.add('hidden-view');
+                        this.nav('login');
+                        this.syncData();
+                        this.syncHistory();
+                    }
+                });
+
+                await startAuth();
+                this.initMaps();
+                this.initSpeechRecognition();
+            },
+
+            initMaps() {
+                this.state.dispatcherMap = L.map('dispatcher-map', { zoomControl: false }).setView(this.state.leskovacCenter, 14);
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(this.state.dispatcherMap);
+
+                this.state.driverMap = L.map('driver-map', { zoomControl: false, attributionControl: false }).setView(this.state.leskovacCenter, 16);
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(this.state.driverMap);
+            },
+
+            initSpeechRecognition() {
+                const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+                if (SpeechRecognition) {
+                    this.state.recognition = new SpeechRecognition();
+                    this.state.recognition.lang = 'sr-RS';
+                    this.state.recognition.interimResults = true;
+                    this.state.recognition.continuous = false;
+
+                    this.state.recognition.onresult = (event) => {
+                        const transcript = event.results[0][0].transcript;
+                        document.getElementById('recognized-text').textContent = `"${transcript}"`;
+                        if (event.results[0].isFinal) {
+                            this.processAITranscript(transcript);
+                        }
+                    };
+                }
+            },
+
+            async startSmartCall() {
+                const modal = document.getElementById('ai-voice-status');
+                modal.classList.remove('hidden');
+                document.getElementById('ai-status-text').textContent = "CITY TAXI IZVOLITE...";
+                document.getElementById('recognized-text').textContent = "";
+                document.getElementById('geo-status').textContent = "";
+
+                await this.playElevenLabsVoice("Siti taksi izvolite. Na koju adresu šaljemo vozilo?");
+
+                setTimeout(() => {
+                    if (this.state.recognition) this.state.recognition.start();
+                }, 1000);
+            },
+
+            async processAITranscript(text) {
+                const rawAddress = text.trim();
+                if (rawAddress.length < 3) {
+                    this.closeAIModal();
+                    return;
+                }
+
+                document.getElementById('geo-status').textContent = "AI izdvaja točnu adresu...";
+                let address = rawAddress;
+
+                try {
+                    const systemPrompt = "Ti si asistent dispečera taksija u Leskovcu. Tvoj zadatak je izvući isključivo naziv ulice i broj iz korisnikovog upita. Ignoriši pozdrave, dodatna objašnjenja ili poštapalice. Vrati SAMO točnu adresu spremnu za geokodiranje. Ako ne prepoznaješ adresu, vrati 'NEPOZNATO'.";
+                    const extractedAddress = await this.callGeminiAPI(rawAddress, systemPrompt);
+
+                    if (extractedAddress && extractedAddress.trim().toUpperCase() !== 'NEPOZNATO') {
+                        address = extractedAddress.trim();
+                        document.getElementById('recognized-text').innerHTML = `
+                            <span class="text-[10px] uppercase text-taxi-yellow block mb-1">Izvorni tekst: "${rawAddress}"</span>
+                            Izdvojeno: ${address}
+                        `;
+                    } else {
+                        document.getElementById('recognized-text').innerHTML = `
+                            <span class="text-[10px] uppercase text-taxi-yellow block mb-1">Izvorni tekst: "${rawAddress}"</span>
+                            Nije prepoznata adresa, koristi se izvorni tekst: ${address}
+                        `;
+                    }
+                } catch (e) {
+                    console.error("Gemini Address Parsing Greška:", e);
+                    document.getElementById('recognized-text').innerHTML = `
+                            <span class="text-[10px] uppercase text-taxi-yellow block mb-1">Izvorni tekst: "${rawAddress}"</span>
+                            Greška pri analizi, koristi se izvorni tekst: ${address}
+                        `;
+                }
+
+                document.getElementById('geo-status').textContent = "Tražim lokaciju u Leskovcu...";
+
+                let coords = null;
+                try {
+                    const url = `https://eu1.locationiq.com/v1/search.php?key=${this.state.locationIQKey}&q=${encodeURIComponent(address + ", Leskovac, Srbija")}&format=json&limit=1`;
+                    const response = await fetch(url);
+                    const results = await response.json();
+                    if (results && results.length > 0) {
+                        coords = { lat: parseFloat(results[0].lat), lng: parseFloat(results[0].lon) };
+                    }
+                } catch (e) { console.error("LocationIQ error", e); }
+
+                if (!coords) {
+                    coords = { lat: this.state.leskovacCenter[0] + (Math.random() - 0.5) * 0.01, lng: this.state.leskovacCenter[1] + (Math.random() - 0.5) * 0.01 };
+                }
+
+                document.getElementById('ai-status-text').textContent = "NALOG KREIRAN!";
+                const slobodanVozač = this.state.drivers.find(d => d.status === 'slobodan');
+                if (slobodanVozač) {
+                    await this.dispatchToDriver(address, slobodanVozač.id, coords);
+                    await this.playElevenLabsVoice("U redu. Vozilo stiže na adresu " + address);
+                } else {
+                    await this.playElevenLabsVoice("Svi vozači su trenutno zauzeti.");
+                }
+                setTimeout(() => this.closeAIModal(), 3000);
+            },
+
+            async generateAIReport() {
+                if (this.state.history.length === 0) {
+                    this.toast("Nedovoljno podataka za izvještaj.", "error");
+                    return;
+                }
+
+                const modal = document.getElementById('ai-report-modal');
+                const content = document.getElementById('ai-report-content');
+                modal.classList.remove('hidden');
+                content.innerHTML = '<div class="loader mx-auto"></div><p class="text-center mt-4 text-taxi-yellow text-xs animate-pulse">Gemini analizira današnje vožnje...</p>';
+
+                const todayRides = this.state.history.map(h => ({
+                    adresa: h.address,
+                    cijena: h.price,
+                    ocjena: h.rating
+                }));
+
+                const prompt = `Analiziraj sljedeće podatke o vožnjama za današnji dan: ${JSON.stringify(todayRides)}`;
+                const sysPrompt = "Ti si vrhunski analitičar taksi službe. Napiši kratak, motivirajući i profesionalan sažetak (oko 3 rečenice) na srpskom jeziku. Istakni koje su lokacije bile najprofitabilnije/najtraženije, pohvali dobar prosjek ocjena (ako postoji) i daj jedan kratki savjet za bolju optimizaciju posla dispečera. Formatiraj to kao jednostavan tekst bez markdowna.";
+
+                try {
+                    const reportText = await this.callGeminiAPI(prompt, sysPrompt);
+                    content.innerHTML = `<div class="text-left text-white leading-relaxed text-sm"><span class="text-xl float-left mr-2">🚕</span> ${reportText}</div>`;
+                } catch (e) {
+                    content.innerHTML = `<p class="text-red-400">Došlo je do greške pri generiranju izvještaja. Pokušajte ponovno kasnije.</p>`;
+                }
+            },
+
+            async sendChatMessage(e) {
+                e.preventDefault();
+                const input = document.getElementById('ai-chat-input');
+                const msg = input.value.trim();
+                if(!msg) return;
+
+                const chatBox = document.getElementById('ai-chat-messages');
+
+                chatBox.innerHTML += `<div class="bg-taxi-yellow text-taxi-dark p-3 rounded-2xl rounded-tr-none self-end max-w-[85%] font-bold text-xs shadow-lg">${msg}</div>`;
+                input.value = '';
+                chatBox.scrollTop = chatBox.scrollHeight;
+
+                const loadingId = 'loading-' + Date.now();
+                chatBox.innerHTML += `<div id="${loadingId}" class="bg-slate-800 text-slate-400 p-3 rounded-2xl rounded-tl-none self-start max-w-[85%] italic text-xs animate-pulse border border-white/5 shadow-lg">Razmišljam...</div>`;
+                chatBox.scrollTop = chatBox.scrollHeight;
+
+                const context = {
+                    slobodni_vozaci: this.state.drivers.filter(d => d.status === 'slobodan').map(d => d.id),
+                    zauzeti_vozaci: this.state.drivers.filter(d => d.status !== 'slobodan').map(d => d.id),
+                    broj_voznji_danas: this.state.history.length,
+                    ukupna_zarada: this.state.history.reduce((sum, h) => sum + h.price, 0),
+                    zadnje_voznje: this.state.history.slice(0, 3).map(h => h.address)
+                };
+
+                const sysPrompt = `Ti si dispečerski AI asistent za taksi službu u Leskovcu. Odgovaraj kratko, prijateljski i isključivo na srpskom jeziku. Tvoj posao je odgovarati na pitanja dispečera. Podaci o trenutnom stanju baze: ${JSON.stringify(context)}. Nemoj koristiti Markdown formatiranje zvjezdicama. Oslanjaj se na dane podatke.`;
+
+                try {
+                    const response = await this.callGeminiAPI(msg, sysPrompt);
+                    document.getElementById(loadingId).remove();
+                    chatBox.innerHTML += `<div class="bg-slate-800 text-white p-3 rounded-2xl rounded-tl-none self-start max-w-[85%] text-xs border border-white/5 shadow-lg">${response}</div>`;
+                } catch(err) {
+                    if(document.getElementById(loadingId)) document.getElementById(loadingId).remove();
+                    chatBox.innerHTML += `<div class="bg-red-900/50 text-red-200 p-3 rounded-2xl rounded-tl-none self-start max-w-[85%] text-xs border border-red-500/30">Greška: Nije moguće dohvatiti odgovor s poslužitelja.</div>`;
+                }
+                chatBox.scrollTop = chatBox.scrollHeight;
+            },
+
+            closeAIModal() { document.getElementById('ai-voice-status').classList.add('hidden'); },
+
+            nav(viewName) {
+                document.querySelectorAll('[id^="view-"]').forEach(el => el.classList.add('hidden-view'));
+                document.getElementById(`view-${viewName}`).classList.remove('hidden-view');
+                this.state.view = viewName;
+                setTimeout(() => {
+                    if(viewName === 'dispatcher') this.state.dispatcherMap.invalidateSize();
+                    if(viewName === 'driver') this.state.driverMap.invalidateSize();
+                }, 100);
+            },
+
+            resetView() { this.state.dispatcherMap.flyTo(this.state.leskovacCenter, 14); },
+
+            resetDriverView() {
+                if(this.state.driverMap) {
+                    this.state.driverMap.flyTo(this.state.leskovacCenter, 13);
+                }
+            },
+
+            focusDriverLocation() {
+                if(this.state.driverMap && this.state.activeDriver) {
+                    this.state.driverMap.flyTo([this.state.activeDriver.lat, this.state.activeDriver.lng], 17);
+                }
+            },
+
+            syncData() {
+                const { db, appId, collection, onSnapshot } = window.fbase;
+                if(!this.state.currentUser) return;
+
+                onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'drivers'), (snap) => {
+                    this.state.drivers = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    this.updateDispatcherUI();
+                    this.updateMapMarkers();
+                });
+
+                onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'orders'), (snap) => {
+                    const jobs = snap.docs.map(doc => ({ orderId: doc.id, ...doc.data() }));
+                    this.checkJobs(jobs);
+                });
+            },
+
+            syncHistory() {
+                const { db, appId, collection, onSnapshot } = window.fbase;
+                if(!this.state.currentUser) return;
+
+                onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'history'), (snap) => {
+                    this.state.history = snap.docs.map(doc => doc.data()).sort((a,b) => b.timestamp - a.timestamp);
+                    this.updateHistoryUI();
+                });
+            },
+
+            async loginDriver() {
+                const id = document.getElementById('driver-id-login').value;
+                if(!id) return;
+                const { db, appId, doc, getDoc, setDoc } = window.fbase;
+                const dRef = doc(db, 'artifacts', appId, 'public', 'data', 'drivers', id);
+                const res = await getDoc(dRef);
+                const data = res.exists() ? res.data() : { id, status: 'slobodan', lat: 42.998, lng: 21.946 };
+                if (!res.exists()) await setDoc(dRef, data);
+                this.state.activeDriver = data;
+                document.getElementById('drv-label').textContent = `#${id}`;
+                document.getElementById('drv-id-display').textContent = `#${id}`;
+                this.nav('driver');
+                this.startLocationPush();
+                this.setDriverStatus(data.status);
+            },
+
+            startLocationPush() {
+                navigator.geolocation.watchPosition(async (pos) => {
+                    const { db, appId, doc, updateDoc } = window.fbase;
+                    const coords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+                    if (this.state.activeDriver) {
+                        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'drivers', this.state.activeDriver.id), coords);
+                        if(this.state.driverMap && this.state.view === 'driver') this.state.driverMap.setView([coords.lat, coords.lng]);
+                    }
+                }, () => this.simulateMovement(), { enableHighAccuracy: true });
+            },
+
+            simulateMovement() {
+                setInterval(async () => {
+                    if (!this.state.activeDriver) return;
+                    const { db, appId, doc, updateDoc } = window.fbase;
+                    const newLat = this.state.activeDriver.lat + (Math.random() - 0.5) * 0.0005;
+                    const newLng = this.state.activeDriver.lng + (Math.random() - 0.5) * 0.0005;
+                    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'drivers', this.state.activeDriver.id), { lat: newLat, lng: newLng });
+                    this.state.activeDriver.lat = newLat;
+                    this.state.activeDriver.lng = newLng;
+                }, 6000);
+            },
+
+            updateDispatcherUI() {
+                const list = document.getElementById('drivers-status-list');
+                list.innerHTML = '';
+                this.state.drivers.forEach(d => {
+                    const isSlobodan = d.status === 'slobodan';
+                    list.innerHTML += `<div class="glass p-3 rounded-xl flex items-center justify-between border-l-4 ${isSlobodan ? 'border-l-green-500' : 'border-l-red-500'}">
+                        <div class="flex items-center gap-3">
+                            <div class="w-8 h-8 rounded-lg bg-slate-900 flex items-center justify-center font-bold text-taxi-yellow text-[10px]">#${d.id}</div>
+                            <div><p class="text-[10px] font-black uppercase">Vozilo ${d.id}</p><p class="text-[8px] text-slate-500 uppercase">${d.status}</p></div>
+                        </div>
+                        <button onclick="app.focusCar(${d.lat}, ${d.lng})" class="bg-white/5 p-2 rounded-lg text-xs">📍</button>
+                    </div>`;
+                });
+                document.getElementById('active-count-badge').textContent = `${this.state.drivers.filter(d=>d.status==='slobodan').length} ON`;
+            },
+
+            updateHistoryUI() {
+                const list = document.getElementById('history-list');
+                list.innerHTML = '';
+                let totalRides = this.state.history.length;
+                let totalEarn = this.state.history.reduce((acc, curr) => acc + curr.price, 0);
+                document.getElementById('stat-total-rides').textContent = totalRides;
+                document.getElementById('stat-total-earn').textContent = totalEarn + " RSD";
+                this.state.history.slice(0, 10).forEach(h => {
+                    list.innerHTML += `<div class="glass p-3 rounded-xl border border-white/5">
+                        <div class="flex justify-between mb-1"><span class="font-black text-taxi-yellow">#${h.driverId}</span><span class="text-slate-500">${new Date(h.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span></div>
+                        <p class="truncate opacity-70">${h.address}</p>
+                        <div class="flex justify-between mt-1 text-[8px] font-bold"><span>${h.price} RSD</span><span class="text-taxi-yellow">&#11088; ${h.rating}</span></div>
+                    </div>`;
+                });
+            },
+
+            updateMapMarkers() {
+                this.state.orderMarkers.forEach(m => m.remove());
+                this.state.orderMarkers = [];
+                this.state.drivers.forEach(d => {
+                    if(this.state.markers[d.id]) this.state.markers[d.id].setLatLng([d.lat, d.lng]);
+                    else {
+                        const icon = L.divIcon({ className: 'taxi-marker', html: d.id, iconSize: [34, 34] });
+                        this.state.markers[d.id] = L.marker([d.lat, d.lng], { icon }).addTo(this.state.dispatcherMap);
+                    }
+                });
+            },
+
+            focusCar(lat, lng) { this.state.dispatcherMap.flyTo([lat, lng], 17); },
+
+            async dispatchToDriver(addr, drvId, coords = null) {
+                const { db, appId, collection, addDoc } = window.fbase;
+                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'orders'), {
+                    targetId: drvId, address: addr, status: 'pending', timestamp: Date.now(), coords: coords
+                });
+                this.toast(`Nalog poslat vozilu #${drvId}`, "success");
+            },
+
+            checkJobs(jobs) {
+                if(this.state.view !== 'driver' || !this.state.activeDriver) return;
+                const myJob = jobs.find(j => j.targetId === this.state.activeDriver.id && (j.status === 'pending' || j.status === 'accepted'));
+
+                if(myJob) {
+                    this.state.activeJob = myJob;
+                    document.getElementById('job-card').classList.remove('hidden-view');
+                    document.getElementById('job-addr-display').textContent = myJob.address.toUpperCase();
+
+                    if (myJob.coords && this.state.driverMap) {
+                        if (this.state.driverViewOrderMarker) this.state.driverViewOrderMarker.remove();
+                        const icon = L.divIcon({ className: 'order-marker' });
+                        this.state.driverViewOrderMarker = L.marker([myJob.coords.lat, myJob.coords.lng], { icon }).addTo(this.state.driverMap);
+                        this.state.driverMap.flyTo([myJob.coords.lat, myJob.coords.lng], 17);
+                    }
+
+                    const btn = document.getElementById('btn-job-action');
+                    const btnReject = document.getElementById('btn-job-reject');
+                    const etaContainer = document.getElementById('eta-container');
+
+                    if (myJob.status === 'pending') {
+                        btn.textContent = "PRIHVATI";
+                        btn.className = "flex-grow bg-taxi-yellow text-taxi-dark font-black py-5 rounded-3xl text-xl shadow-xl active:scale-95 transition";
+                        btnReject.classList.remove('hidden');
+                        etaContainer.classList.add('hidden');
+                        this.startLoudAlarm(myJob.address);
+                    } else {
+                        btn.textContent = "ZAVRŠI VOŽNJU";
+                        btn.className = "flex-grow bg-green-500 text-white font-black py-5 rounded-3xl text-xl shadow-xl active:scale-95 transition";
+                        btnReject.classList.add('hidden');
+                        etaContainer.classList.add('hidden');
+                        this.stopLoudAlarm();
+                    }
+                } else {
+                    document.getElementById('job-card').classList.add('hidden-view');
+                    this.stopLoudAlarm();
+                    this.stopNavigation();
+                    if (this.state.driverViewOrderMarker) {
+                        this.state.driverViewOrderMarker.remove();
+                        this.state.driverViewOrderMarker = null;
+                    }
+                }
+            },
+
+            startLoudAlarm(address) {
+                if (this.state.alarmInterval) return;
+
+                const playAlarm = () => {
+                    const synth = window.speechSynthesis;
+                    const msg = new SpeechSynthesisUtterance("NOVA VOŽNJA! NOVA VOŽNJA! Adresa je: " + address);
+                    msg.lang = 'sr-RS';
+                    msg.pitch = 1.5;
+                    msg.rate = 1.2;
+                    msg.volume = 1.0;
+                    synth.speak(msg);
+
+                    const audio = new AudioContext();
+                    const osc = audio.createOscillator();
+                    const gain = audio.createGain();
+                    osc.connect(gain);
+                    gain.connect(audio.destination);
+                    osc.type = 'sawtooth';
+                    osc.frequency.setValueAtTime(880, audio.currentTime);
+                    gain.gain.setValueAtTime(0.1, audio.currentTime);
+                    osc.start();
+                    osc.stop(audio.currentTime + 0.3);
+                };
+
+                playAlarm();
+                this.state.alarmInterval = setInterval(playAlarm, 4000);
+            },
+
+            stopLoudAlarm() {
+                if (this.state.alarmInterval) {
+                    clearInterval(this.state.alarmInterval);
+                    this.state.alarmInterval = null;
+                    window.speechSynthesis.cancel();
+                }
+            },
+
+            handleJobAcceptInit() {
+                if (this.state.activeJob.status === 'pending') {
+                    document.getElementById('eta-container').classList.remove('hidden');
+                    document.getElementById('btn-job-action').textContent = "POTVRDI ETA";
+                    document.getElementById('btn-job-reject').classList.add('hidden');
+                } else {
+                    this.handleJobAction();
+                }
+            },
+
+            setETA(mins) {
+                this.state.selectedETA = mins;
+                this.finishAccepting();
+            },
+
+            async finishAccepting() {
+                let mins = this.state.selectedETA || document.getElementById('custom-eta').value;
+                if (!mins) { this.toast("Unesite minute!", "error"); return; }
+
+                const { db, appId, doc, updateDoc } = window.fbase;
+                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'orders', this.state.activeJob.orderId), {
+                    status: 'accepted',
+                    eta: mins
+                });
+                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'drivers', this.state.activeDriver.id), { status: 'u vožnji' });
+                this.stopLoudAlarm();
+
+                if (this.state.activeJob.coords && this.state.driverMap) {
+                    this.startNavigation(this.state.activeJob.coords);
+                }
+
+                this.toast(`Prihvaćeno: Stižete za ${mins} min.`, "success");
+            },
+
+            async handleJobReject() {
+                if (!this.state.activeJob) return;
+                const { db, appId, doc, updateDoc } = window.fbase;
+                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'orders', this.state.activeJob.orderId), { status: 'rejected' });
+                this.stopLoudAlarm();
+                this.stopNavigation();
+                this.state.activeJob = null;
+                document.getElementById('job-card').classList.add('hidden-view');
+            },
+
+            async handleJobAction() {
+                const { db, appId, doc, updateDoc, collection, addDoc } = window.fbase;
+                const price = 350 + Math.floor(Math.random() * 200);
+                const rating = (4 + Math.random()).toFixed(1);
+
+                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'history'), {
+                    driverId: this.state.activeDriver.id,
+                    address: this.state.activeJob.address,
+                    price: price,
+                    rating: rating,
+                    timestamp: Date.now()
+                });
+
+                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'orders', this.state.activeJob.orderId), { status: 'completed' });
+                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'drivers', this.state.activeDriver.id), { status: 'slobodan' });
+                this.state.activeJob = null;
+                this.stopNavigation();
+                this.setDriverStatus('slobodan');
+                this.toast("Vožnja završena!", "success");
+            },
+
+            async setDriverStatus(newStatus) {
+                if (!this.state.activeDriver) return;
+                const { db, appId, doc, updateDoc } = window.fbase;
+                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'drivers', this.state.activeDriver.id), { status: newStatus });
+                this.state.activeDriver.status = newStatus;
+
+                const txt = document.getElementById('status-text');
+                const dot = document.getElementById('status-dot');
+                txt.textContent = newStatus.toUpperCase();
+
+                const btnSlobodan = document.getElementById('btn-stat-slobodan');
+                const btnPauza = document.getElementById('btn-stat-pauza');
+                const btnVan = document.getElementById('btn-stat-van');
+
+                if(btnSlobodan && btnPauza && btnVan) {
+                    [btnSlobodan, btnPauza, btnVan].forEach(btn => {
+                        btn.className = "bg-slate-800 text-slate-400 font-bold py-3 rounded-2xl text-[10px] transition hover:bg-slate-700";
+                    });
+
+                    if (newStatus === 'slobodan') {
+                        dot.style.background = '#22c55e';
+                        txt.style.color = '#22c55e';
+                        btnSlobodan.className = "bg-green-500 text-white font-bold py-3 rounded-2xl text-[10px] transition ring-2 ring-green-500 ring-offset-2 ring-offset-taxi-dark shadow-lg shadow-green-500/20";
+                    } else if (newStatus === 'pauza') {
+                        dot.style.background = '#f59e0b';
+                        txt.style.color = '#f59e0b';
+                        btnPauza.className = "bg-amber-500 text-white font-bold py-3 rounded-2xl text-[10px] transition ring-2 ring-amber-500 ring-offset-2 ring-offset-taxi-dark shadow-lg shadow-amber-500/20";
+                    } else {
+                        dot.style.background = '#ef4444';
+                        txt.style.color = '#ef4444';
+                        btnVan.className = "bg-red-500 text-white font-bold py-3 rounded-2xl text-[10px] transition ring-2 ring-red-500 ring-offset-2 ring-offset-taxi-dark shadow-lg shadow-red-500/20";
+                    }
+                }
+            },
+
+            startNavigation(destCoords) {
+                if (this.state.routingControl) {
+                    this.state.driverMap.removeControl(this.state.routingControl);
+                }
+                const driverLatLng = L.latLng(this.state.activeDriver.lat, this.state.activeDriver.lng);
+                const destLatLng = L.latLng(destCoords.lat, destCoords.lng);
+
+                this.state.routingControl = L.Routing.control({
+                    waypoints: [driverLatLng, destLatLng],
+                    routeWhileDragging: false,
+                    addWaypoints: false,
+                    show: false,
+                    lineOptions: { styles: [{color: '#0ea5e9', opacity: 0.8, weight: 6}] },
+                    createMarker: function() { return null; },
+                    fitSelectedRoutes: true
+                }).addTo(this.state.driverMap);
+            },
+
+            stopNavigation() {
+                if (this.state.routingControl && this.state.driverMap) {
+                    this.state.driverMap.removeControl(this.state.routingControl);
+                    this.state.routingControl = null;
+                }
+            },
+
+            async playElevenLabsVoice(text) {
+                const xiApiKey = "sk_aa6a5506e986ee89165a637f4769f128b01353e77b8dd4b2";
+                const voiceId = "21m00Tcm4TlvDq8ikWAM";
+                try {
+                    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'xi-api-key': xiApiKey },
+                        body: JSON.stringify({ text, model_id: "eleven_multilingual_v2" })
+                    });
+                    const blob = await response.blob();
+                    const audio = new Audio(URL.createObjectURL(blob));
+                    return new Promise(resolve => {
+                        audio.onended = resolve;
+                        audio.play();
+                    });
+                } catch (e) { console.error(e); }
+            },
+
+            toast(msg, type = 'info') {
+                const area = document.getElementById('toast-area');
+                const t = document.createElement('div');
+                t.className = `p-4 rounded-2xl glass border-l-4 shadow-2xl flex items-center gap-3 text-[10px] font-black pointer-events-auto transition-all transform translate-x-10 opacity-0`;
+                t.style.borderColor = type === 'success' ? '#10B981' : (type === 'error' ? '#EF4444' : '#FFD700');
+                t.innerHTML = `<span>🚕</span> ${msg}`;
+                area.appendChild(t);
+                setTimeout(() => t.classList.remove('translate-x-10', 'opacity-0'), 10);
+                setTimeout(() => { t.classList.add('translate-x-10', 'opacity-0'); setTimeout(() => t.remove(), 500); }, 4000);
+            }
+        };
+
+        window.onload = () => app.init();
+        setInterval(() => { const el = document.getElementById('clock'); if(el) el.textContent = new Date().toLocaleTimeString(); }, 1000);
+    </script>
+</body>
+</html>
